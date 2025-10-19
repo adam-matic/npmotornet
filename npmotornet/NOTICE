@@ -1,0 +1,50 @@
+npmotornet - NumPy-based Motor Control Library
+================================================
+
+This is a derivative work based on MotorNet, converted from PyTorch to NumPy.
+
+Original Work:
+--------------
+MotorNet: A Python toolbox for controlling differentiable biomechanical
+effectors with artificial neural networks
+
+Copyright (c) 2021-2024 Olivier Codol and contributors
+Original repository: https://github.com/OlivierCodol/MotorNet
+License: GNU General Public License v3.0
+
+Derivative Work:
+----------------
+npmotornet - NumPy conversion
+Copyright (c) 2025
+
+Changes Made:
+- Converted all PyTorch tensor operations to NumPy array operations
+- Removed torch.nn.Module inheritance, replaced with plain Python classes
+- Removed PyTorch Parameter wrappers
+- Removed device management (GPU/CPU)
+- Added fallback for gymnasium dependency
+- All core functionality (skeleton, muscle, effector) converted to pure NumPy
+
+License:
+--------
+This derivative work is licensed under the GNU General Public License v3.0,
+the same license as the original MotorNet project.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+Attribution:
+------------
+When using this software, please cite the original MotorNet work:
+
+  Codol, O., Michaels, J.A., Kashefi, M. et al. MotorNet, a Python toolbox
+  for controlling differentiable biomechanical effectors with artificial
+  neural networks. eLife 12:RP88591 (2024).
+  https://doi.org/10.7554/eLife.88591
+
+Disclaimer:
+-----------
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
