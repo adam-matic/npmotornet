@@ -372,15 +372,24 @@ class Effector:
 
     # length, velocity and moment of each path segment
     # -----------------------
-    # segment length is just the euclidian distance between the two points
-    segment_len = np.sqrt(np.sum(diff_pos ** 2, axis=1, keepdims=True))
+    # OPTIMIZED: segment length calculation
+    # For 2D cases (most common), use np.hypot which is faster than sqrt(sum(squares))
+    if diff_pos.shape[1] == 2:
+      segment_len = np.hypot(diff_pos[:, 0:1, :], diff_pos[:, 1:2, :])
+    else:
+      segment_len = np.sqrt(np.sum(diff_pos ** 2, axis=1, keepdims=True))
+
+    # OPTIMIZED: Pre-compute reciprocal to convert divisions to multiplications
+    # Add small epsilon to prevent division by zero
+    inv_segment_len = 1.0 / (segment_len + 1e-10)
+
     # segment velocity is trickier: we are not after radial velocity but relative velocity.
     # https://math.stackexchange.com/questions/1481701/time-derivative-of-the-distance-between-2-points-moving-over-time
     # Formally, if segment_len=0 then segment_vel is not defined. We could substitute with 0 here because a
     # muscle segment will never flip backward, so the velocity can only be positive afterwards anyway.
-    segment_vel = np.sum(diff_pos * diff_vel / segment_len, axis=1, keepdims=True)
+    segment_vel = np.sum(diff_pos * diff_vel * inv_segment_len, axis=1, keepdims=True)
     # for moment arm calculation, see Sherman, Seth, Delp (2013) -- DOI:10.1115/DETC2013-13633
-    segment_moments = np.sum(diff_ddof * diff_pos[:, :, None], axis=1) / segment_len
+    segment_moments = np.sum(diff_ddof * diff_pos[:, :, None], axis=1) * inv_segment_len
 
     # remove differences between points that don't belong to the same muscle
     segment_len_cleaned = np.where(self.muscle_transitions, 0., segment_len)

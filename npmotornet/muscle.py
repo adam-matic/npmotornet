@@ -360,80 +360,58 @@ class MujocoHillMuscle(Muscle):
     muscle_len = np.clip(musculotendon_len - self.l0_se, a_min=0.001, a_max=None) / self.l0_ce
     muscle_vel = geometry_state[:, 1:2, :] / self.vmax
 
-    # muscle forces
-    # Compute x and flpe using conditional logic
-    # Use np.where which handles broadcasting correctly
-    x = np.where(
-      muscle_len <= 1,
-      self.zero_as_tensor,
-      np.where(
-        muscle_len <= self.b,
-        (muscle_len - 1) / self.p1,
-        (muscle_len - self.b) / self.p1,
-        )
-      )
-    flpe = np.where(
-      muscle_len <= 1,
-      self.zero_as_tensor,
-      np.where(
-        muscle_len <= self.b,
-        self.p2 * x**3,
-        self.p2 * (1 + 3*x),
-        )
-      )
+    # OPTIMIZED: muscle forces using np.where but with reduced nesting
+    # Compute x with simplified logic
+    x = np.where(muscle_len <= 1, 0.,
+                 np.where(muscle_len <= self.b,
+                          (muscle_len - 1) / self.p1,
+                          (muscle_len - self.b) / self.p1))
+
+    # Compute flpe with simplified logic
+    flpe = np.where(muscle_len <= 1, 0.,
+                    np.where(muscle_len <= self.b,
+                             self.p2 * x**3,
+                             self.p2 * (1 + 3*x)))
 
     # length-active
     flce = self._bump(muscle_len, mid=1, lmax=self.lmax) + 0.15 * self._bump(muscle_len, mid=self.mid, lmax=0.95)
 
-    # velocity-active
-    # Use np.where for correct broadcasting
-    fvce = np.where(
-      muscle_vel <= -1,
-      self.zero_as_tensor,
-      np.where(
-        muscle_vel <= 0.,
-        (muscle_vel+1) * (muscle_vel+1),
-        np.where(
-          muscle_vel <= self.c,
-          self.fvmax - (self.c-muscle_vel)*(self.c-muscle_vel)/self.c,
-          self.fvmax,
-          )
-        )
-      )
+    # OPTIMIZED: velocity-active force with simplified np.where
+    fvce = np.where(muscle_vel <= -1, 0.,
+                    np.where(muscle_vel <= 0.,
+                             (muscle_vel + 1) ** 2,
+                             np.where(muscle_vel <= self.c,
+                                      self.fvmax - (self.c - muscle_vel)**2 / self.c,
+                                      self.fvmax)))
     force = (activation * flce * fvce + self.passive_forces * flpe) * self.max_iso_force
     return np.concatenate([activation, muscle_len * self.l0_ce, muscle_vel * self.vmax, flpe, flce, fvce, force], axis=1)
 
 
   def _bump(self, L, mid, lmax):
-    """Skewed bump function: quadratic spline."""
+    """OPTIMIZED: Skewed bump function with cleaner logic."""
 
     left = 0.5*(self.lmin+mid)
     right = 0.5*(mid+lmax)
 
-    out_of_range = np.logical_or(L <= self.lmin, L >= lmax)
-    less_than_left = L < left
-    less_than_mid = L < mid
-    less_than_right = L < right
+    # Check if out of range
+    out_of_range = (L <= self.lmin) | (L >= lmax)
 
-    x = np.where(out_of_range, self.zero_as_tensor,
-      np.where(less_than_left, (L-self.lmin) / (left-self.lmin),
-        np.where(less_than_mid, (mid-L) / (mid-left),
-          np.where(less_than_right, (L-mid) / (right-mid),
-            (lmax-L) / (lmax-right),
-            )
-          )
-        )
-      )
+    # Compute x for each region using cascading np.where
+    x = np.where(L < left, (L - self.lmin) / (left - self.lmin),
+                 np.where(L < mid, (mid - L) / (mid - left),
+                          np.where(L < right, (L - mid) / (right - mid),
+                                   (lmax - L) / (lmax - right))))
+
+    # Compute y = 0.5 * x^2 with different patterns
     pfivexx = 0.5 * x * x
-    y = np.where(out_of_range, self.zero_as_tensor,
-      np.where(less_than_left, pfivexx,
-        np.where(less_than_mid, 1 - pfivexx,
-          np.where(less_than_right, 1 - pfivexx,
-            pfivexx,
-            )
-          )
-        )
-      )
+    y = np.where(L < left, pfivexx,
+                 np.where(L < mid, 1 - pfivexx,
+                          np.where(L < right, 1 - pfivexx,
+                                   pfivexx)))
+
+    # Set to zero if out of range
+    y = np.where(out_of_range, 0., y)
+
     return y
 
 
