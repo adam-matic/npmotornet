@@ -361,6 +361,8 @@ class MujocoHillMuscle(Muscle):
     muscle_vel = geometry_state[:, 1:2, :] / self.vmax
 
     # muscle forces
+    # Compute x and flpe using conditional logic
+    # Use np.where which handles broadcasting correctly
     x = np.where(
       muscle_len <= 1,
       self.zero_as_tensor,
@@ -384,6 +386,7 @@ class MujocoHillMuscle(Muscle):
     flce = self._bump(muscle_len, mid=1, lmax=self.lmax) + 0.15 * self._bump(muscle_len, mid=self.mid, lmax=0.95)
 
     # velocity-active
+    # Use np.where for correct broadcasting
     fvce = np.where(
       muscle_vel <= -1,
       self.zero_as_tensor,

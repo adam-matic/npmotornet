@@ -32,9 +32,12 @@ class Effector:
     timestep: `Float`, size of a single timestep (in sec).
     n_ministeps" `Integer`, number of integration ministeps per timestep. This assumes the action input is constant
       across ministeps.
-    integration_method: `String`, "euler" to specify that numerical integration should be done using the Euler
-      method, or "rk4", "rungekutta4", "runge-kutta4", or "runge-kutta-4" to specify the Runge-Kutta 4 method
-      instead. This argument is case-insensitive.
+    integration_method: `String`, the integration method to use. Options:
+      - "euler": First-order Euler method (fixed timestep)
+      - "rk4", "rungekutta4", "runge-kutta4", "runge-kutta-4": Fourth-order Runge-Kutta (fixed timestep)
+      - "rkf45", "runge-kutta-fehlberg", "adaptive": Runge-Kutta-Fehlberg 4/5 (adaptive timestep)
+      - "dopri5", "dormand-prince": Dormand-Prince 5/4 (adaptive timestep)
+      This argument is case-insensitive.
     damping: `Float`, the damping coefficient applied at each joint, proportional to joint velocity. This value
       should be positive to reduce joint torques proportionally to joint velocity.
     pos_upper_bound: `Float`, `list` or `tuple`, indicating the upper boundary of the skeleton's joint position.
@@ -49,6 +52,12 @@ class Effector:
     vel_lower_bound: `Float`, `list` or `tuple`, indicating the lower boundary of the skeleton's joint velocity.
       This should be a `n`-elements vector or `list`, with `n` the number of joints of the skeleton. For instance,
       for a two degrees-of-freedom arm, we would have `n=2`.
+    adaptive_tolerance: `Float`, error tolerance for adaptive timestep methods (default: 1e-6). Lower values
+      increase accuracy but may slow down simulation. Only used with adaptive integration methods.
+    adaptive_min_dt: `Float`, minimum allowed timestep for adaptive methods (default: 1e-6). This prevents
+      the timestep from becoming too small in stiff regions.
+    adaptive_max_dt: `Float`, maximum allowed timestep for adaptive methods (default: 0.1). This prevents
+      the timestep from growing too large in smooth regions.
   """
 
   def __init__(
@@ -64,6 +73,9 @@ class Effector:
     pos_upper_bound: Union[float, list, tuple] = None,
     vel_lower_bound: Union[float, list, tuple] = None,
     vel_upper_bound: Union[float, list, tuple] = None,
+    adaptive_tolerance: float = 1e-6,
+    adaptive_min_dt: float = 1e-6,
+    adaptive_max_dt: float = 0.1,
   ):
 
     self.__name__ = name
@@ -80,6 +92,14 @@ class Effector:
     self.integration_method = integration_method.casefold()  # make string fully in lower case
     self._np_random = None
     self.seed = None
+
+    # Adaptive timestep control parameters
+    self.adaptive_tolerance = adaptive_tolerance
+    self.adaptive_min_dt = adaptive_min_dt
+    self.adaptive_max_dt = adaptive_max_dt
+    self.current_adaptive_dt = self.minidt  # Initialize to minidt
+    self.adaptive_step_count = 0
+    self.adaptive_rejected_count = 0
 
     # handle position & velocity ranges
     pos_lower_bound = self.skeleton.pos_lower_bound if pos_lower_bound is None else pos_lower_bound
@@ -146,6 +166,10 @@ class Effector:
       self._integrate = self._euler
     elif self.integration_method in ('rk4', 'rungekutta4', 'runge-kutta4', 'runge-kutta-4'):  # tuple faster than set
       self._integrate = self._rungekutta4
+    elif self.integration_method in ('rkf45', 'runge-kutta-fehlberg', 'adaptive'):
+      self._integrate = self._rkf45_adaptive
+    elif self.integration_method in ('dopri5', 'dormand-prince'):
+      self._integrate = self._dopri5_adaptive
     else:
       raise ValueError("Provided integration method not recognized : {}".format(self.integration_method))
 
@@ -363,18 +387,38 @@ class Effector:
     segment_vel_cleaned = np.where(self.muscle_transitions, 0., segment_vel)
     segment_mom_cleaned = np.where(self.muscle_transitions, 0., segment_moments)
 
-    # sum up the contribution of all the segments belonging to a given muscle, looping over all the muscles
-    # NOTE: using a loop is not ideal here, and ideally this should move toward using nested arrays, which can
-    # accommodate ragged dimensions along the number of fixation points. However, this is a reasonable solution
-    # for now and works well in practice.
-    musculotendon_len_as_list = [np.sum(y, axis=-1) for y in np.split(segment_len_cleaned, np.cumsum(self.section_splits)[:-1], axis=-1)]
-    musculotendon_vel_as_list = [np.sum(y, axis=-1) for y in np.split(segment_vel_cleaned, np.cumsum(self.section_splits)[:-1], axis=-1)]
-    moment_arms_as_list = [np.sum(y, axis=-1) for y in np.split(segment_mom_cleaned, np.cumsum(self.section_splits)[:-1], axis=-1)]
+    # sum up the contribution of all the segments belonging to a given muscle
+    # OPTIMIZED: Use np.add.reduceat for vectorized segmented summation instead of Python loop
+    # Compute cumulative indices for reduceat (start indices for each muscle)
+    if not hasattr(self, '_reduceat_indices'):
+      # Cache the indices since section_splits doesn't change after muscles are added
+      cumsum = np.cumsum([0] + self.section_splits[:-1])
+      self._reduceat_indices = cumsum.astype(int)
 
-    # bring back into a single array
-    musculotendon_len = np.stack(musculotendon_len_as_list, axis=-1)
-    musculotendon_vel = np.stack(musculotendon_vel_as_list, axis=-1)
-    moment_arms = np.stack(moment_arms_as_list, axis=-1)
+    # For batch dimension, we need to sum along axis=-1 for each segment
+    # reduceat works on 1D, so we need to handle batch dimension separately
+    batch_size = segment_len_cleaned.shape[0]
+    n_features_len = segment_len_cleaned.shape[1]
+    n_features_mom = segment_mom_cleaned.shape[1]
+
+    # Reshape to (batch * features, n_segments), apply reduceat, reshape back
+    musculotendon_len = np.add.reduceat(
+      segment_len_cleaned.reshape(batch_size * n_features_len, -1),
+      self._reduceat_indices,
+      axis=1
+    ).reshape(batch_size, n_features_len, self.n_muscles)
+
+    musculotendon_vel = np.add.reduceat(
+      segment_vel_cleaned.reshape(batch_size * n_features_len, -1),
+      self._reduceat_indices,
+      axis=1
+    ).reshape(batch_size, n_features_len, self.n_muscles)
+
+    moment_arms = np.add.reduceat(
+      segment_mom_cleaned.reshape(batch_size * n_features_mom, -1),
+      self._reduceat_indices,
+      axis=1
+    ).reshape(batch_size, n_features_mom, self.n_muscles)
 
     # pack all this into one state array and flip the dimensions back (batch_size * n_features * n_muscles)
     geometry_state = np.concatenate([musculotendon_len, musculotendon_vel, moment_arms], axis=1)
@@ -418,6 +462,193 @@ class Effector:
     k = {key: (k1[key] + 2 * (k2[key] + k3[key]) + k4[key]) / 6 for key in k1.keys()}
     states = self.integration_step(self.minidt, state_derivative=k, states=states0)
     self._set_state(states)
+
+  def _rkf45_adaptive(self, action, endpoint_load, joint_load):
+    """Runge-Kutta-Fehlberg (RKF45) with adaptive timestep control.
+
+    This method uses an embedded 5th and 4th order Runge-Kutta method to estimate
+    the error and adaptively adjust the timestep for optimal accuracy and speed.
+    """
+    states0 = self.states
+    dt = self.current_adaptive_dt
+    max_attempts = 100
+
+    for attempt in range(max_attempts):
+      # RKF45 Butcher tableau coefficients
+      # k1
+      k1 = self.ode(action, states=states0, endpoint_load=endpoint_load, joint_load=joint_load)
+
+      # k2
+      states_temp = self.integration_step(dt * 1/4, state_derivative=k1, states=states0)
+      k2 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+
+      # k3
+      k_combined = {key: (3*k1[key] + 9*k2[key]) / 32 for key in k1.keys()}
+      states_temp = self.integration_step(dt * 3/8, state_derivative=k_combined, states=states0)
+      k3 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+
+      # k4
+      k_combined = {key: (1932*k1[key] - 7200*k2[key] + 7296*k3[key]) / 2197 for key in k1.keys()}
+      states_temp = self.integration_step(dt * 12/13, state_derivative=k_combined, states=states0)
+      k4 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+
+      # k5
+      k_combined = {key: (439*k1[key]/216 - 8*k2[key] + 3680*k3[key]/513 - 845*k4[key]/4104) for key in k1.keys()}
+      states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
+      k5 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+
+      # k6
+      k_combined = {key: (-8*k1[key]/27 + 2*k2[key] - 3544*k3[key]/2565 + 1859*k4[key]/4104 - 11*k5[key]/40) for key in k1.keys()}
+      states_temp = self.integration_step(dt * 1/2, state_derivative=k_combined, states=states0)
+      k6 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+
+      # 4th order solution
+      k_4th = {key: (25*k1[key]/216 + 1408*k3[key]/2565 + 2197*k4[key]/4104 - k5[key]/5) for key in k1.keys()}
+      states_4th = self.integration_step(dt, state_derivative=k_4th, states=states0)
+
+      # 5th order solution
+      k_5th = {key: (16*k1[key]/135 + 6656*k3[key]/12825 + 28561*k4[key]/56430 - 9*k5[key]/50 + 2*k6[key]/55) for key in k1.keys()}
+      states_5th = self.integration_step(dt, state_derivative=k_5th, states=states0)
+
+      # Error estimation
+      error = self._compute_state_error(states_4th, states_5th)
+
+      # Compute optimal timestep
+      if error == 0:
+        # Perfect accuracy, maximize timestep
+        dt_new = self.adaptive_max_dt
+        accept = True
+      else:
+        # Standard adaptive step formula with safety factor
+        safety = 0.9
+        dt_new = safety * dt * (self.adaptive_tolerance / error) ** 0.2
+        dt_new = np.clip(dt_new, self.adaptive_min_dt, self.adaptive_max_dt)
+        accept = error <= self.adaptive_tolerance
+
+      if accept:
+        # Accept the step
+        self._set_state(states_5th)
+        self.current_adaptive_dt = dt_new
+        self.adaptive_step_count += 1
+        break
+      else:
+        # Reject the step and retry with smaller dt
+        dt = dt_new
+        self.adaptive_rejected_count += 1
+
+        if attempt == max_attempts - 1:
+          # If we've exhausted attempts, accept with minimum timestep
+          self._set_state(states_5th)
+          self.current_adaptive_dt = self.adaptive_min_dt
+          self.adaptive_step_count += 1
+          break
+
+  def _dopri5_adaptive(self, action, endpoint_load, joint_load):
+    """Dormand-Prince (DOPRI5) with adaptive timestep control.
+
+    This is a more efficient embedded 5th/4th order method than RKF45.
+    """
+    states0 = self.states
+    dt = self.current_adaptive_dt
+    max_attempts = 100
+
+    for attempt in range(max_attempts):
+      # DOPRI5 Butcher tableau coefficients
+      # k1
+      k1 = self.ode(action, states=states0, endpoint_load=endpoint_load, joint_load=joint_load)
+
+      # k2
+      states_temp = self.integration_step(dt * 1/5, state_derivative=k1, states=states0)
+      k2 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+
+      # k3
+      k_combined = {key: (3*k1[key] + 9*k2[key]) / 40 for key in k1.keys()}
+      states_temp = self.integration_step(dt * 3/10, state_derivative=k_combined, states=states0)
+      k3 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+
+      # k4
+      k_combined = {key: (44*k1[key]/45 - 56*k2[key]/15 + 32*k3[key]/9) for key in k1.keys()}
+      states_temp = self.integration_step(dt * 4/5, state_derivative=k_combined, states=states0)
+      k4 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+
+      # k5
+      k_combined = {key: (19372*k1[key]/6561 - 25360*k2[key]/2187 + 64448*k3[key]/6561 - 212*k4[key]/729) for key in k1.keys()}
+      states_temp = self.integration_step(dt * 8/9, state_derivative=k_combined, states=states0)
+      k5 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+
+      # k6
+      k_combined = {key: (9017*k1[key]/3168 - 355*k2[key]/33 + 46732*k3[key]/5247 + 49*k4[key]/176 - 5103*k5[key]/18656) for key in k1.keys()}
+      states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
+      k6 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+
+      # k7
+      k_combined = {key: (35*k1[key]/384 + 500*k3[key]/1113 + 125*k4[key]/192 - 2187*k5[key]/6784 + 11*k6[key]/84) for key in k1.keys()}
+      states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
+      k7 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+
+      # 4th order solution (embedded)
+      k_4th = {key: (5179*k1[key]/57600 + 7571*k3[key]/16695 + 393*k4[key]/640 - 92097*k5[key]/339200 + 187*k6[key]/2100 + k7[key]/40) for key in k1.keys()}
+      states_4th = self.integration_step(dt, state_derivative=k_4th, states=states0)
+
+      # 5th order solution
+      k_5th = {key: (35*k1[key]/384 + 500*k3[key]/1113 + 125*k4[key]/192 - 2187*k5[key]/6784 + 11*k6[key]/84) for key in k1.keys()}
+      states_5th = self.integration_step(dt, state_derivative=k_5th, states=states0)
+
+      # Error estimation
+      error = self._compute_state_error(states_4th, states_5th)
+
+      # Compute optimal timestep
+      if error == 0:
+        dt_new = self.adaptive_max_dt
+        accept = True
+      else:
+        safety = 0.9
+        dt_new = safety * dt * (self.adaptive_tolerance / error) ** 0.2
+        dt_new = np.clip(dt_new, self.adaptive_min_dt, self.adaptive_max_dt)
+        accept = error <= self.adaptive_tolerance
+
+      if accept:
+        self._set_state(states_5th)
+        self.current_adaptive_dt = dt_new
+        self.adaptive_step_count += 1
+        break
+      else:
+        dt = dt_new
+        self.adaptive_rejected_count += 1
+
+        if attempt == max_attempts - 1:
+          self._set_state(states_5th)
+          self.current_adaptive_dt = self.adaptive_min_dt
+          self.adaptive_step_count += 1
+          break
+
+  def _compute_state_error(self, states1, states2):
+    """Compute the normalized error between two state dictionaries.
+
+    Args:
+      states1: First state dictionary
+      states2: Second state dictionary
+
+    Returns:
+      Normalized error as a scalar
+    """
+    error = 0.0
+    n_elements = 0
+
+    for key in ['muscle', 'joint']:
+      if key in states1 and key in states2:
+        diff = np.abs(states1[key] - states2[key])
+        # Normalize by state magnitude + tolerance to avoid division by zero
+        scale = np.abs(states1[key]) + self.adaptive_tolerance
+        normalized_diff = diff / scale
+        error += np.sum(normalized_diff ** 2)
+        n_elements += normalized_diff.size
+
+    if n_elements > 0:
+      # Root mean square error
+      error = np.sqrt(error / n_elements)
+
+    return error
 
   def integration_step(self, dt, state_derivative, states):
     """Performs one numerical integration step for the :class:`npmotornet.muscle.Muscle` object class or

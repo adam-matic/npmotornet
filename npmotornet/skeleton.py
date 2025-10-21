@@ -499,8 +499,15 @@ class TwoDofArm(Skeleton):
 
     sho, elb_wrt_sho = np.split(joint_angles, 2, axis=1)
     elb = elb_wrt_sho + sho
-    elb_y = self.L1 * np.sin(sho)[:, :, None]
-    elb_x = self.L1 * np.cos(sho)[:, :, None]
+
+    # OPTIMIZED: Pre-compute and cache trigonometric values to avoid redundant computations
+    sin_sho = np.sin(sho)
+    cos_sho = np.cos(sho)
+    sin_elb = np.sin(elb)
+    cos_elb = np.cos(elb)
+
+    elb_y = self.L1 * sin_sho[:, :, None]
+    elb_x = self.L1 * cos_sho[:, :, None]
 
     # If we want the position of a fixation point relative to the origin of its bone given global cartesian
     # coordinates, then we use the joint angles; here we are trying to do the inverse of that, that is getting the
@@ -509,10 +516,26 @@ class TwoDofArm(Skeleton):
     # This line picks no rotation angle if the muscle path point is fixed on the extrinstic workspace
     # (path_fixation_body = 0), the shoulder angle if it is fixed on the upper arm (path_fixation_body = 1) and the
     # eblow angle if it is fixed on the forearm (path_fixation_body = 2).
+
+    # OPTIMIZED: Use pre-computed sin/cos values instead of recomputing
+    # Use advanced indexing to select the right angle for each fixation point
     flat_path_fixation_body = path_fixation_body.reshape(-1)
+
+    # Create angle array by selecting shoulder or elbow angle based on fixation body
+    # 0 -> no rotation, 1 -> shoulder, 2 -> elbow
     ang = np.where(flat_path_fixation_body == 0., 0., np.where(flat_path_fixation_body == 1., -sho, -elb))
-    ca = np.cos(ang)
-    sa = np.sin(ang)
+
+    # Reuse cached sin/cos by selecting from pre-computed values
+    # This avoids recomputing sin/cos, just selects which one to use
+    ca_sho = cos_sho
+    sa_sho = -sin_sho
+    ca_elb = cos_elb
+    sa_elb = -sin_elb
+
+    ca = np.where(flat_path_fixation_body == 0., 1.,
+                  np.where(flat_path_fixation_body == 1., ca_sho, ca_elb))
+    sa = np.where(flat_path_fixation_body == 0., 0.,
+                  np.where(flat_path_fixation_body == 1., sa_sho, sa_elb))
 
     # rotation matrix to transform the bone-relative coordinates into global coordinates
     rot1 = np.concatenate([ca, sa], axis=1).reshape(-1, 2, n_points)
