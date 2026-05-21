@@ -517,22 +517,8 @@ class TwoDofArm(Skeleton):
     # (path_fixation_body = 0), the shoulder angle if it is fixed on the upper arm (path_fixation_body = 1) and the
     # eblow angle if it is fixed on the forearm (path_fixation_body = 2).
 
-    # OPTIMIZED: Use boolean indexing instead of nested np.where for better performance
-    flat_path_fixation_body = path_fixation_body.reshape(-1)
-
-    # Pre-allocate result arrays (default to no rotation - workspace case)
-    ca = np.ones_like(cos_sho)
-    sa = np.zeros_like(sin_sho)
-
-    # Create boolean masks for each fixation type
-    mask_shoulder = (flat_path_fixation_body == 1.)
-    mask_elbow = (flat_path_fixation_body == 2.)
-
-    # Apply rotations using boolean indexing (faster than nested np.where)
-    ca[mask_shoulder] = cos_sho[mask_shoulder]
-    sa[mask_shoulder] = -sin_sho[mask_shoulder]
-    ca[mask_elbow] = cos_elb[mask_elbow]
-    sa[mask_elbow] = -sin_elb[mask_elbow]
+    ca = np.where(path_fixation_body == 1., cos_sho[:, :, None], np.where(path_fixation_body == 2., cos_elb[:, :, None], 1.))
+    sa = np.where(path_fixation_body == 1., -sin_sho[:, :, None], np.where(path_fixation_body == 2., -sin_elb[:, :, None], 0.))
 
     # rotation matrix to transform the bone-relative coordinates into global coordinates
     rot1 = np.concatenate([ca, sa], axis=1).reshape(-1, 2, n_points)

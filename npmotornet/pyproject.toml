@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "npmotornet"
+version = "0.1.0"
+description = "NumPy/Numba-based MotorNet biomechanical simulation"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "numba",
+]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["npmotornet*"]
