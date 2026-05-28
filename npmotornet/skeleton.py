@@ -574,3 +574,148 @@ class TwoDofArm(Skeleton):
         }
        )
     return cfg
+
+
+class OneDofArm(Skeleton):
+  """A one degree-of-freedom planar arm: a single rigid link rotating about a fixed pivot at the origin.
+
+  The link lies along the `+x` axis at `theta = 0`, so the endpoint position is `(l*cos(theta), l*sin(theta))`.
+  When `g != 0`, gravity is assumed to act along the `-y` direction, producing a joint torque of
+  `-m*g*lg*cos(theta)` (zero at `theta = +-pi/2`, maximal in magnitude at `theta = 0` or `pi`).
+
+  The parameter layout, API, and conventions mirror :class:`TwoDofArm` for the single-bone case.
+
+  Args:
+    name: `String`, the name of the skeleton.
+    m: `Float`, mass (kg) of the bone.
+    lg: `Float`, position of the center of gravity along the bone, measured from the pivot (m).
+    i: `Float`, moment of inertia (kg.m^2) of the bone about its center of mass.
+    l: `Float`, length (m) of the bone.
+    viscosity: `Float`, joint damping coefficient. The damping torque is `-viscosity * theta_dot`.
+    g: `Float`, gravitational acceleration magnitude (m/s^2). Default `0.` disables gravity.
+    **kwargs: All contents are passed to the parent :class:`Skeleton` base class. Also allows for some backward
+      compatibility (uppercase `M`, `L`, `Lg`, `I` are accepted as aliases).
+  """
+
+  def __init__(self, name: str = 'one_dof_arm', m: float = 1.534315, lg: float = 0.181479,
+         i: float = 0.020062, l: float = 0.26, viscosity: float = 0., g: float = 0., **kwargs):
+
+    joint_limit = [-np.pi, np.pi]
+    lb = kwargs.pop('pos_lower_bound', [joint_limit[0]])
+    ub = kwargs.pop('pos_upper_bound', [joint_limit[1]])
+    super().__init__(dof=1, space_dim=2, pos_lower_bound=lb, pos_upper_bound=ub, name=name, **kwargs)
+
+    self.m = m
+    self.Lg = kwargs.get('Lg', lg)
+    self.I = kwargs.get('I', i)
+    self.L = kwargs.get('L', l)
+    self.M = kwargs.get('M', m)
+
+    # for consistency with args & backward compatibility (matches the TwoDofArm dual-case pattern)
+    self.lg = self.Lg
+    self.i = self.I
+    self.l = self.L
+
+    self.c_viscosity = viscosity
+    self.g = g
+
+    # parallel-axis: total inertia about the pivot
+    self.inertia_total = self.I + self.m * self.Lg ** 2
+    # gravity torque coefficient; zero when g=0 so the gravity term vanishes cleanly
+    self.gravity_torque_coef = self.m * self.g * self.Lg
+
+  def _ode(self, inputs, joint_state, endpoint_load):
+    # joint_state: (batch, 2) with columns [pos, vel]
+    pos = joint_state[:, 0]
+    vel = joint_state[:, 1]
+    c = np.cos(pos)
+    s = np.sin(pos)
+
+    # jacobian to distribute external loads (forces) applied at the endpoint to the single link
+    # endpoint = (l*c, l*s) -> d(endpoint)/d(theta) = (-l*s, l*c)
+    # torque = jacobian.T @ endpoint_load
+    tau_load = (-self.L * s) * endpoint_load[:, 0] + (self.L * c) * endpoint_load[:, 1]
+
+    damping = -self.c_viscosity * vel
+    gravity = -self.gravity_torque_coef * c
+
+    tau = inputs[:, 0] + tau_load + damping + gravity
+    acc = tau / self.inertia_total
+    return acc[:, None]
+
+  def _integrate(self, dt, state_derivative, joint_state):
+    old_pos, old_vel = np.split(joint_state, 2, axis=1)
+    new_vel = old_vel + state_derivative * dt
+    new_pos = old_pos + old_vel * dt
+
+    # Clip to ensure values don't get off-hand.
+    # We clip position after velocity to ensure any off-space position is taken into account when clipping velocity.
+    new_vel = self.clip_velocity(new_pos, new_vel)
+    new_pos = self.clip_position(new_pos)
+    return np.concatenate([new_pos, new_vel], axis=1)
+
+  def _joint2cartesian(self, joint_state):
+    j = np.reshape(joint_state, (-1, self.state_dim))
+    pos = j[:, 0]
+    vel = j[:, 1]
+    c = np.cos(pos)
+    s = np.sin(pos)
+
+    end_pos_x = self.L * c
+    end_pos_y = self.L * s
+    end_vel_x = -self.L * s * vel
+    end_vel_y = self.L * c * vel
+    return np.stack([end_pos_x, end_pos_y, end_vel_x, end_vel_y], axis=1)
+
+  def _path2cartesian(self, path_coordinates, path_fixation_body, joint_state):
+    n_points = path_fixation_body.size
+    joint_angles, joint_vel = np.split(joint_state, 2, axis=1)
+
+    cos_theta = np.cos(joint_angles)
+    sin_theta = np.sin(joint_angles)
+
+    # pick no rotation if the muscle path point is fixed on the extrinsic workspace (path_fixation_body = 0),
+    # and the bone angle if it is fixed on the link (path_fixation_body = 1).
+    ca = np.where(path_fixation_body == 1., cos_theta[:, :, None], 1.)
+    sa = np.where(path_fixation_body == 1., -sin_theta[:, :, None], 0.)
+
+    # rotation matrix to transform the bone-relative coordinates into global coordinates
+    rot1 = np.concatenate([ca, sa], axis=1).reshape(-1, 2, n_points)
+    rot2 = np.concatenate([-sa, ca], axis=1).reshape(-1, 2, n_points)
+
+    # derivative of each fixation point's position wrt the angle of the bone they are fixed on
+    dx_da = np.sum(-path_coordinates * rot2, axis=1, keepdims=True)
+    dy_da = np.sum(path_coordinates * rot1, axis=1, keepdims=True)
+
+    # zero out worldspace-fixation derivatives, then stack along the (single) dof axis
+    dx_da_dof = np.where(path_fixation_body == 0., 0., dx_da)
+    dy_da_dof = np.where(path_fixation_body == 0., 0., dy_da)
+    dxy_da = np.concatenate([dx_da_dof, dy_da_dof], axis=1)
+    dxy_ddof = dxy_da[:, :, None, :]
+
+    theta_vel_3d = joint_vel[:, 0, None, None]
+    dxy_dt = dxy_da * theta_vel_3d  # chain rule
+
+    xy = np.concatenate([dy_da, -dx_da], axis=1)  # single bone is rooted at the origin, no offset
+    return xy, dxy_dt, dxy_ddof
+
+  def get_save_config(self):
+    """Gets the base configuration from the :meth:`Skeleton.get_base_config` method, and adds the link's properties:
+    bone length, mass, center of gravity, total inertia, viscosity, and gravity coefficient.
+
+    Returns:
+      A `dictionary` containing the object instance's full configuration.
+    """
+    cfg = self.get_base_config()
+    cfg.update(
+      {
+        'I': self.detach(self.I),
+        'L': self.detach(self.L),
+        'Lg': self.detach(self.Lg),
+        'm': self.detach(self.m),
+        'c_viscosity': self.detach(self.c_viscosity),
+        'g': self.detach(self.g),
+        'inertia_total': self.detach(self.inertia_total),
+        }
+       )
+    return cfg
