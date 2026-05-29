@@ -1,4 +1,5 @@
 import numpy as np
+import warnings
 from typing import Union, Any
 
 # Try to import gymnasium, but provide fallback if not available
@@ -461,12 +462,15 @@ class Effector:
 
   def _rungekutta4(self, action, endpoint_load, joint_load):
     states0 = self.states
+    # Each stage evaluates the derivative at states0 + (fraction * dt) * k_previous.
+    # All intermediate states must branch from states0, not from the previously
+    # advanced state, otherwise the method degrades to first order.
     k1 = self.ode(action, states=states0, endpoint_load=endpoint_load, joint_load=joint_load)
     states = self.integration_step(self.half_minidt, state_derivative=k1, states=states0)
     k2 = self.ode(action, states=states, endpoint_load=endpoint_load, joint_load=joint_load)
-    states = self.integration_step(self.half_minidt, state_derivative=k2, states=states)
+    states = self.integration_step(self.half_minidt, state_derivative=k2, states=states0)
     k3 = self.ode(action, states=states, endpoint_load=endpoint_load, joint_load=joint_load)
-    states = self.integration_step(self.minidt, state_derivative=k3, states=states)
+    states = self.integration_step(self.minidt, state_derivative=k3, states=states0)
     k4 = self.ode(action, states=states, endpoint_load=endpoint_load, joint_load=joint_load)
     k = {key: (k1[key] + 2 * (k2[key] + k3[key]) + k4[key]) / 6 for key in k1.keys()}
     states = self.integration_step(self.minidt, state_derivative=k, states=states0)
@@ -475,161 +479,161 @@ class Effector:
   def _rkf45_adaptive(self, action, endpoint_load, joint_load):
     """Runge-Kutta-Fehlberg (RKF45) with adaptive timestep control.
 
-    This method uses an embedded 5th and 4th order Runge-Kutta method to estimate
-    the error and adaptively adjust the timestep for optimal accuracy and speed.
+    Uses an embedded 5th/4th order Runge-Kutta pair to estimate the local error and
+    adapt the internal sub-step size. The integration is sub-stepped so that each call
+    advances the state by exactly one effector ministep (``minidt``).
     """
-    states0 = self.states
-    dt = self.current_adaptive_dt
-    max_attempts = 100
-
-    for attempt in range(max_attempts):
-      # RKF45 Butcher tableau coefficients
-      # k1
-      k1 = self.ode(action, states=states0, endpoint_load=endpoint_load, joint_load=joint_load)
-
-      # k2
-      states_temp = self.integration_step(dt * 1/4, state_derivative=k1, states=states0)
-      k2 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
-
-      # k3
-      k_combined = {key: (3*k1[key] + 9*k2[key]) / 32 for key in k1.keys()}
-      states_temp = self.integration_step(dt * 3/8, state_derivative=k_combined, states=states0)
-      k3 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
-
-      # k4
-      k_combined = {key: (1932*k1[key] - 7200*k2[key] + 7296*k3[key]) / 2197 for key in k1.keys()}
-      states_temp = self.integration_step(dt * 12/13, state_derivative=k_combined, states=states0)
-      k4 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
-
-      # k5
-      k_combined = {key: (439*k1[key]/216 - 8*k2[key] + 3680*k3[key]/513 - 845*k4[key]/4104) for key in k1.keys()}
-      states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
-      k5 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
-
-      # k6
-      k_combined = {key: (-8*k1[key]/27 + 2*k2[key] - 3544*k3[key]/2565 + 1859*k4[key]/4104 - 11*k5[key]/40) for key in k1.keys()}
-      states_temp = self.integration_step(dt * 1/2, state_derivative=k_combined, states=states0)
-      k6 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
-
-      # 4th order solution
-      k_4th = {key: (25*k1[key]/216 + 1408*k3[key]/2565 + 2197*k4[key]/4104 - k5[key]/5) for key in k1.keys()}
-      states_4th = self.integration_step(dt, state_derivative=k_4th, states=states0)
-
-      # 5th order solution
-      k_5th = {key: (16*k1[key]/135 + 6656*k3[key]/12825 + 28561*k4[key]/56430 - 9*k5[key]/50 + 2*k6[key]/55) for key in k1.keys()}
-      states_5th = self.integration_step(dt, state_derivative=k_5th, states=states0)
-
-      # Error estimation
-      error = self._compute_state_error(states_4th, states_5th)
-
-      # Compute optimal timestep
-      if error == 0:
-        # Perfect accuracy, maximize timestep
-        dt_new = self.adaptive_max_dt
-        accept = True
-      else:
-        # Standard adaptive step formula with safety factor
-        safety = 0.9
-        dt_new = safety * dt * (self.adaptive_tolerance / error) ** 0.2
-        dt_new = np.clip(dt_new, self.adaptive_min_dt, self.adaptive_max_dt)
-        accept = error <= self.adaptive_tolerance
-
-      if accept:
-        # Accept the step
-        self._set_state(states_5th)
-        self.current_adaptive_dt = dt_new
-        self.adaptive_step_count += 1
-        break
-      else:
-        # Reject the step and retry with smaller dt
-        dt = dt_new
-        self.adaptive_rejected_count += 1
-
-        if attempt == max_attempts - 1:
-          # If we've exhausted attempts, accept with minimum timestep
-          self._set_state(states_5th)
-          self.current_adaptive_dt = self.adaptive_min_dt
-          self.adaptive_step_count += 1
-          break
+    self._adaptive_integrate(self._rkf45_step, action, endpoint_load, joint_load)
 
   def _dopri5_adaptive(self, action, endpoint_load, joint_load):
     """Dormand-Prince (DOPRI5) with adaptive timestep control.
 
-    This is a more efficient embedded 5th/4th order method than RKF45.
+    A more efficient embedded 5th/4th order pair than RKF45. Like :meth:`_rkf45_adaptive`,
+    it sub-steps internally so each call advances the state by exactly ``minidt``.
     """
+    self._adaptive_integrate(self._dopri5_step, action, endpoint_load, joint_load)
+
+  def _adaptive_integrate(self, step_fn, action, endpoint_load, joint_load):
+    """Advance the state by exactly one effector ministep (``minidt``) using an embedded
+    Runge-Kutta pair with adaptive sub-stepping.
+
+    The suggested sub-step size is carried across calls via :attr:`current_adaptive_dt`,
+    but is never allowed to overshoot the ministep boundary, so that ``n_ministeps`` calls
+    advance the simulation by exactly :attr:`dt`. This keeps the adaptive methods on the
+    same fixed time grid as the fixed-step methods.
+
+    Args:
+      step_fn: A single-step function ``(action, endpoint_load, joint_load, states0, dt)``
+        returning ``(states_high, error)``.
+    """
+    target = self.minidt
+    t_local = 0.0
     states0 = self.states
-    dt = self.current_adaptive_dt
-    max_attempts = 100
+    eps = target * 1e-9  # tolerance for floating-point comparison at the boundary
+    max_substeps = 10000  # safety net against an unsatisfiable tolerance
+    substeps = 0
 
-    for attempt in range(max_attempts):
-      # DOPRI5 Butcher tableau coefficients
-      # k1
-      k1 = self.ode(action, states=states0, endpoint_load=endpoint_load, joint_load=joint_load)
-
-      # k2
-      states_temp = self.integration_step(dt * 1/5, state_derivative=k1, states=states0)
-      k2 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
-
-      # k3
-      k_combined = {key: (3*k1[key] + 9*k2[key]) / 40 for key in k1.keys()}
-      states_temp = self.integration_step(dt * 3/10, state_derivative=k_combined, states=states0)
-      k3 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
-
-      # k4
-      k_combined = {key: (44*k1[key]/45 - 56*k2[key]/15 + 32*k3[key]/9) for key in k1.keys()}
-      states_temp = self.integration_step(dt * 4/5, state_derivative=k_combined, states=states0)
-      k4 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
-
-      # k5
-      k_combined = {key: (19372*k1[key]/6561 - 25360*k2[key]/2187 + 64448*k3[key]/6561 - 212*k4[key]/729) for key in k1.keys()}
-      states_temp = self.integration_step(dt * 8/9, state_derivative=k_combined, states=states0)
-      k5 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
-
-      # k6
-      k_combined = {key: (9017*k1[key]/3168 - 355*k2[key]/33 + 46732*k3[key]/5247 + 49*k4[key]/176 - 5103*k5[key]/18656) for key in k1.keys()}
-      states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
-      k6 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
-
-      # k7
-      k_combined = {key: (35*k1[key]/384 + 500*k3[key]/1113 + 125*k4[key]/192 - 2187*k5[key]/6784 + 11*k6[key]/84) for key in k1.keys()}
-      states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
-      k7 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
-
-      # 4th order solution (embedded)
-      k_4th = {key: (5179*k1[key]/57600 + 7571*k3[key]/16695 + 393*k4[key]/640 - 92097*k5[key]/339200 + 187*k6[key]/2100 + k7[key]/40) for key in k1.keys()}
-      states_4th = self.integration_step(dt, state_derivative=k_4th, states=states0)
-
-      # 5th order solution
-      k_5th = {key: (35*k1[key]/384 + 500*k3[key]/1113 + 125*k4[key]/192 - 2187*k5[key]/6784 + 11*k6[key]/84) for key in k1.keys()}
-      states_5th = self.integration_step(dt, state_derivative=k_5th, states=states0)
-
-      # Error estimation
-      error = self._compute_state_error(states_4th, states_5th)
-
-      # Compute optimal timestep
-      if error == 0:
-        dt_new = self.adaptive_max_dt
-        accept = True
-      else:
-        safety = 0.9
-        dt_new = safety * dt * (self.adaptive_tolerance / error) ** 0.2
-        dt_new = np.clip(dt_new, self.adaptive_min_dt, self.adaptive_max_dt)
-        accept = error <= self.adaptive_tolerance
-
-      if accept:
-        self._set_state(states_5th)
-        self.current_adaptive_dt = dt_new
+    while t_local < target - eps:
+      substeps += 1
+      if substeps > max_substeps:
+        # Pathological: the tolerance cannot be met even with tiny sub-steps (e.g. set
+        # below float32 resolution). Finish the remaining interval in a single step so
+        # the call always advances exactly `minidt` and never hangs.
+        dt = target - t_local
+        states0, _ = step_fn(action, endpoint_load, joint_load, states0, dt)
+        t_local = target
         self.adaptive_step_count += 1
+        warnings.warn(
+          "adaptive integrator: exceeded {} sub-steps within one ministep; finishing it "
+          "in a single step. Relax `adaptive_tolerance` or raise `adaptive_min_dt`.".format(
+            max_substeps), RuntimeWarning, stacklevel=2)
         break
+
+      # take the suggested sub-step, capped so we land exactly on the ministep boundary
+      dt = min(self.current_adaptive_dt, target - t_local)
+      states_high, error = step_fn(action, endpoint_load, joint_load, states0, dt)
+      at_min_dt = dt <= self.adaptive_min_dt
+
+      if error <= self.adaptive_tolerance or at_min_dt:
+        # accept: tolerance met, or we are already at the smallest allowed sub-step
+        if at_min_dt and error > self.adaptive_tolerance:
+          self.adaptive_rejected_count += 1
+          warnings.warn(
+            "adaptive integrator: error tolerance ({:.1e}) could not be met at the minimum "
+            "sub-step ({:.1e}); accepting the step to make progress. Consider relaxing "
+            "`adaptive_tolerance` or lowering `adaptive_min_dt`.".format(
+              self.adaptive_tolerance, self.adaptive_min_dt),
+            RuntimeWarning, stacklevel=2)
+        states0 = states_high
+        t_local += dt
+        self.adaptive_step_count += 1
       else:
-        dt = dt_new
+        # reject: do not advance, just shrink the sub-step
         self.adaptive_rejected_count += 1
 
-        if attempt == max_attempts - 1:
-          self._set_state(states_5th)
-          self.current_adaptive_dt = self.adaptive_min_dt
-          self.adaptive_step_count += 1
-          break
+      # update the suggested sub-step for the next sub-step / next call
+      if error == 0:
+        self.current_adaptive_dt = self.adaptive_max_dt
+      else:
+        self.current_adaptive_dt = float(np.clip(
+          0.9 * dt * (self.adaptive_tolerance / error) ** 0.2,
+          self.adaptive_min_dt, self.adaptive_max_dt))
+
+    self._set_state(states0)
+
+  def _rkf45_step(self, action, endpoint_load, joint_load, states0, dt):
+    """One embedded RKF45 step of size ``dt`` from ``states0``. Returns ``(states_5th, error)``."""
+    # k1
+    k1 = self.ode(action, states=states0, endpoint_load=endpoint_load, joint_load=joint_load)
+    # k2
+    states_temp = self.integration_step(dt * 1/4, state_derivative=k1, states=states0)
+    k2 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+    # k3 (intermediate state = states0 + dt * sum_j a_3j k_j; the a-weights are already
+    # baked into k_combined, so the full dt is used here, not dt * c_3)
+    k_combined = {key: (3*k1[key] + 9*k2[key]) / 32 for key in k1.keys()}
+    states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
+    k3 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+    # k4
+    k_combined = {key: (1932*k1[key] - 7200*k2[key] + 7296*k3[key]) / 2197 for key in k1.keys()}
+    states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
+    k4 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+    # k5
+    k_combined = {key: (439*k1[key]/216 - 8*k2[key] + 3680*k3[key]/513 - 845*k4[key]/4104) for key in k1.keys()}
+    states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
+    k5 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+    # k6
+    k_combined = {key: (-8*k1[key]/27 + 2*k2[key] - 3544*k3[key]/2565 + 1859*k4[key]/4104 - 11*k5[key]/40) for key in k1.keys()}
+    states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
+    k6 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+
+    # 4th order solution
+    k_4th = {key: (25*k1[key]/216 + 1408*k3[key]/2565 + 2197*k4[key]/4104 - k5[key]/5) for key in k1.keys()}
+    states_4th = self.integration_step(dt, state_derivative=k_4th, states=states0)
+    # 5th order solution
+    k_5th = {key: (16*k1[key]/135 + 6656*k3[key]/12825 + 28561*k4[key]/56430 - 9*k5[key]/50 + 2*k6[key]/55) for key in k1.keys()}
+    states_5th = self.integration_step(dt, state_derivative=k_5th, states=states0)
+
+    error = self._compute_state_error(states_4th, states_5th)
+    return states_5th, error
+
+  def _dopri5_step(self, action, endpoint_load, joint_load, states0, dt):
+    """One embedded DOPRI5 step of size ``dt`` from ``states0``. Returns ``(states_5th, error)``."""
+    # k1
+    k1 = self.ode(action, states=states0, endpoint_load=endpoint_load, joint_load=joint_load)
+    # k2
+    states_temp = self.integration_step(dt * 1/5, state_derivative=k1, states=states0)
+    k2 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+    # k3 (intermediate state = states0 + dt * sum_j a_3j k_j; the a-weights are already
+    # baked into k_combined, so the full dt is used here, not dt * c_3)
+    k_combined = {key: (3*k1[key] + 9*k2[key]) / 40 for key in k1.keys()}
+    states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
+    k3 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+    # k4
+    k_combined = {key: (44*k1[key]/45 - 56*k2[key]/15 + 32*k3[key]/9) for key in k1.keys()}
+    states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
+    k4 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+    # k5
+    k_combined = {key: (19372*k1[key]/6561 - 25360*k2[key]/2187 + 64448*k3[key]/6561 - 212*k4[key]/729) for key in k1.keys()}
+    states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
+    k5 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+    # k6
+    k_combined = {key: (9017*k1[key]/3168 - 355*k2[key]/33 + 46732*k3[key]/5247 + 49*k4[key]/176 - 5103*k5[key]/18656) for key in k1.keys()}
+    states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
+    k6 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+    # k7 (uses the 5th order b-weights; FSAL stage)
+    k_combined = {key: (35*k1[key]/384 + 500*k3[key]/1113 + 125*k4[key]/192 - 2187*k5[key]/6784 + 11*k6[key]/84) for key in k1.keys()}
+    states_temp = self.integration_step(dt, state_derivative=k_combined, states=states0)
+    k7 = self.ode(action, states=states_temp, endpoint_load=endpoint_load, joint_load=joint_load)
+
+    # 4th order solution (embedded)
+    k_4th = {key: (5179*k1[key]/57600 + 7571*k3[key]/16695 + 393*k4[key]/640 - 92097*k5[key]/339200 + 187*k6[key]/2100 + k7[key]/40) for key in k1.keys()}
+    states_4th = self.integration_step(dt, state_derivative=k_4th, states=states0)
+    # 5th order solution
+    k_5th = {key: (35*k1[key]/384 + 500*k3[key]/1113 + 125*k4[key]/192 - 2187*k5[key]/6784 + 11*k6[key]/84) for key in k1.keys()}
+    states_5th = self.integration_step(dt, state_derivative=k_5th, states=states0)
+
+    error = self._compute_state_error(states_4th, states_5th)
+    return states_5th, error
 
   def _compute_state_error(self, states1, states2):
     """Compute the normalized error between two state dictionaries.
