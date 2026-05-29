@@ -263,12 +263,13 @@ class PointMass(Skeleton):
     self.dpos_ddof = dpos_ddof
 
   def _ode(self, inputs, joint_state, endpoint_load):
-    return inputs + endpoint_load
+    # full joint-state derivative: d(pos)/dt = velocity, d(vel)/dt = force / mass
+    _, vel = np.split(joint_state, 2, axis=1)
+    acc = (inputs + endpoint_load) / self.mass
+    return np.concatenate([vel, acc], axis=1)
 
   def _integrate(self, dt, state_derivative, joint_state):
-    old_pos, old_vel = np.split(joint_state, 2, axis=1)
-    new_vel = old_vel + state_derivative * dt / self.mass
-    new_pos = old_pos + old_vel * dt
+    new_pos, new_vel = np.split(joint_state + state_derivative * dt, 2, axis=1)
     new_vel = self.clip_velocity(new_pos, new_vel)
     new_pos = self.clip_position(new_pos)
     return np.concatenate([new_pos, new_vel], axis=1)
@@ -331,8 +332,8 @@ class FixedPointMass(Skeleton):
     self.dpos_ddof = dpos_ddof
 
   def _ode(self, inputs, joint_state, endpoint_load):
-    # Return zero acceleration - position and velocity don't change
-    return np.zeros_like(inputs)
+    # Return a zero full-state derivative - position and velocity don't change
+    return np.zeros_like(joint_state)
 
   def _integrate(self, dt, state_derivative, joint_state):
     # Position and velocity remain constant (fixed in space)
@@ -462,12 +463,12 @@ class TwoDofArm(Skeleton):
     r_col = np.stack([-inertia[:, 0, 1], inertia[:, 0, 0]], axis=1)
     inertia_inv = denom[:, None, None] * np.stack([l_col, r_col], axis=2)
     new_acc_3d = np.matmul(inertia_inv, rhs)
-    return new_acc_3d[:, :, 0]
+    # full joint-state derivative: d(pos)/dt = velocity, d(vel)/dt = acceleration
+    _, vel = np.split(joint_state, 2, axis=1)
+    return np.concatenate([vel, new_acc_3d[:, :, 0]], axis=1)
 
   def _integrate(self, dt, state_derivative, joint_state):
-    old_pos, old_vel = np.split(joint_state, 2, axis=1)
-    new_vel = old_vel + state_derivative * dt
-    new_pos = old_pos + old_vel * dt
+    new_pos, new_vel = np.split(joint_state + state_derivative * dt, 2, axis=1)
 
     # Clip to ensure values don't get off-hand.
     # We clip position after velocity to ensure any off-space position is taken into account when clipping velocity.
@@ -641,12 +642,12 @@ class OneDofArm(Skeleton):
 
     tau = inputs[:, 0] + tau_load + damping + gravity
     acc = tau / self.inertia_total
-    return acc[:, None]
+    # full joint-state derivative: d(pos)/dt = velocity, d(vel)/dt = acceleration
+    _, vel = np.split(joint_state, 2, axis=1)
+    return np.concatenate([vel, acc[:, None]], axis=1)
 
   def _integrate(self, dt, state_derivative, joint_state):
-    old_pos, old_vel = np.split(joint_state, 2, axis=1)
-    new_vel = old_vel + state_derivative * dt
-    new_pos = old_pos + old_vel * dt
+    new_pos, new_vel = np.split(joint_state + state_derivative * dt, 2, axis=1)
 
     # Clip to ensure values don't get off-hand.
     # We clip position after velocity to ensure any off-space position is taken into account when clipping velocity.

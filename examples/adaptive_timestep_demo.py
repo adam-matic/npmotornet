@@ -73,13 +73,12 @@ def run_comparison():
             joint_state = effector.states['joint']
             positions.append(joint_state[0, :2].copy())
 
-            if hasattr(effector, 'current_adaptive_dt'):
-                timesteps.append(effector.current_adaptive_dt)
-                t += effector.current_adaptive_dt * effector.n_ministeps
-            else:
-                timesteps.append(base_dt)
-                t += base_dt
-
+            # Every step() advances the simulation by exactly base_dt, regardless of the
+            # integration method. For adaptive methods, current_adaptive_dt is the internal
+            # sub-step size the controller settled on (recorded here only for illustration).
+            is_adaptive = 'adaptive' in name.lower()
+            timesteps.append(effector.current_adaptive_dt if is_adaptive else base_dt)
+            t += base_dt
             times.append(t)
 
         # Store results

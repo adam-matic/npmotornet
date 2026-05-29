@@ -245,7 +245,9 @@ class NumbaTwoDofArm(TwoDofArm):
             self.I1, self.I2, self.coriolis_1, self.coriolis_2, self.c_viscosity
         )
 
-        return acc
+        # full joint-state derivative: d(pos)/dt = velocity, d(vel)/dt = acceleration
+        _, vel = np.split(joint_state, 2, axis=1)
+        return np.concatenate([vel, acc], axis=1)
 
     def _path2cartesian(self, path_coordinates, path_fixation_body, joint_state):
         """Numba-optimized path2cartesian using JIT-compiled core function."""
