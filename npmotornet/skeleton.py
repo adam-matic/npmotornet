@@ -385,7 +385,7 @@ class TwoDofArm(Skeleton):
 
   def __init__(self, name: str = 'two_dof_arm', m1: float = 1.864572, m2: float = 1.534315, l1g: float = 0.180496,
          l2g: float = 0.181479, i1: float = 0.013193, i2: float = 0.020062, l1: float = 0.309,
-         l2: float = 0.26, viscosity: float = 0., **kwargs):
+         l2: float = 0.26, viscosity: float = 0., g: float = 0., **kwargs):
 
     sho_limit = np.deg2rad([-0, 140])  # mechanical constraints - used to be -90 180
     elb_limit = np.deg2rad([0, 160])
@@ -424,6 +424,10 @@ class TwoDofArm(Skeleton):
     self.coriolis_1 = - self.m2 * self.L1 * self.L2g
     self.coriolis_2 = self.m2 * self.L1 * self.L2g
     self.c_viscosity = viscosity  # put at zero but available if implemented later on
+    self.g = g
+    # gravity torque coefficients (ROADMAP 1.3); zero when g=0 so the term vanishes cleanly
+    self.gravity_coef_sho = self.m1 * self.L1g + self.m2 * self.L1  # for cos(θ1) in shoulder torque
+    self.gravity_coef_elb = self.m2 * self.L2g                       # for cos(θ1+θ2) in both torques
 
   def _ode(self, inputs, joint_state, endpoint_load):
     # first two elements of state are joint position, last two elements are joint angular velocities
@@ -456,7 +460,12 @@ class TwoDofArm(Skeleton):
     l_col = (jacobian_12 * endpoint_load[:, 0]) + (jacobian_22 * endpoint_load[:, 1])
     torques = inputs + np.stack([r_col, l_col], axis=1)
 
-    rhs = -coriolis[:, :, None] + torques[:, :, None]
+    # gravity torques (batch_size x 2); zero when self.g == 0
+    gravity_1 = -self.g * (self.gravity_coef_sho * c1 + self.gravity_coef_elb * c12)
+    gravity_2 = -self.g * self.gravity_coef_elb * c12
+    gravity = np.stack([gravity_1, gravity_2], axis=1)
+
+    rhs = -coriolis[:, :, None] + torques[:, :, None] + gravity[:, :, None]
 
     denom = 1 / (inertia[:, 0, 0] * inertia[:, 1, 1] - inertia[:, 0, 1] * inertia[:, 1, 0])
     l_col = np.stack([inertia[:, 1, 1], -inertia[:, 1, 0]], axis=1)
@@ -571,7 +580,8 @@ class TwoDofArm(Skeleton):
         'coriolis_1': self.detach(self.coriolis_1),
         'coriolis_2': self.detach(self.coriolis_2),
         'm1': self.detach(self.m1),
-        'm2': self.detach(self.m2)
+        'm2': self.detach(self.m2),
+        'g': self.detach(self.g),
         }
        )
     return cfg
