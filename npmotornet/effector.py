@@ -930,8 +930,18 @@ class RigidTendonArm26(Effector):
     pos_lower_bound = kwargs.pop('pos_lower_bound', [sho_limit[0], elb_limit[0]])
     pos_upper_bound = kwargs.pop('pos_upper_bound', [sho_limit[1], elb_limit[1]])
 
+    # gravity is a skeleton property; pop it so it reaches the default TwoDofArm
+    # rather than the parent Effector (which would reject the unknown kwarg).
+    g = kwargs.pop('g', 0.)
     if skeleton is None:
-      skeleton = TwoDofArm(m1=1.82, m2=1.43, l1g=.135, l2g=.165, i1=.051, i2=.057, l1=.309, l2=.333)
+      skeleton = TwoDofArm(m1=1.82, m2=1.43, l1g=.135, l2g=.165, i1=.051, i2=.057, l1=.309, l2=.333, g=g)
+
+    # tau_activation is a muscle property (the activation-ODE time constant).
+    # Pop it here so callers can set it via the effector ctor; apply to the
+    # passed muscle instance after construction.
+    tau_activation = kwargs.pop('tau_activation', None)
+    if tau_activation is not None:
+      muscle.tau_activation = np.array(tau_activation, dtype=np.float32)
 
     super().__init__(
       skeleton=skeleton,
@@ -991,8 +1001,9 @@ class CompliantTendonArm26(RigidTendonArm26):
 
   def __init__(self, timestep=0.0002, skeleton=None, muscle_kwargs: dict = {}, **kwargs):
     integration_method = kwargs.pop('integration_method', 'rk4')
+    g = kwargs.pop('g', 0.)
     if skeleton is None:
-      skeleton = TwoDofArm(m1=1.82, m2=1.43, l1g=.135, l2g=.165, i1=.051, i2=.057, l1=.309, l2=.333)
+      skeleton = TwoDofArm(m1=1.82, m2=1.43, l1g=.135, l2g=.165, i1=.051, i2=.057, l1=.309, l2=.333, g=g)
 
     super().__init__(
       muscle=CompliantTendonHillMuscle(),

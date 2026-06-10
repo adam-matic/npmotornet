@@ -385,7 +385,7 @@ class TwoDofArm(Skeleton):
 
   def __init__(self, name: str = 'two_dof_arm', m1: float = 1.864572, m2: float = 1.534315, l1g: float = 0.180496,
          l2g: float = 0.181479, i1: float = 0.013193, i2: float = 0.020062, l1: float = 0.309,
-         l2: float = 0.26, viscosity: float = 0., **kwargs):
+         l2: float = 0.26, viscosity: float = 0., g: float = 0., **kwargs):
 
     sho_limit = np.deg2rad([-0, 140])  # mechanical constraints - used to be -90 180
     elb_limit = np.deg2rad([0, 160])
@@ -425,6 +425,17 @@ class TwoDofArm(Skeleton):
     self.coriolis_2 = self.m2 * self.L1 * self.L2g
     self.c_viscosity = viscosity  # put at zero but available if implemented later on
 
+    # Gravity (acts along -y). The configuration-dependent joint torque is
+    #   G1 = g*[(m1*L1g + m2*L1)*cos(theta1) + m2*L2g*cos(theta1+theta2)]
+    #   G2 = g*[ m2*L2g*cos(theta1+theta2)]
+    # which is dU/dtheta of the potential U = g*[m1*y1g + m2*y2g] with the bones
+    # rooted at the origin (theta measured from +x, so a horizontal arm is loaded
+    # maximally and a vertical arm not at all). Pre-folded into two coefficients so
+    # the term vanishes cleanly when g=0.
+    self.g = g
+    self.grav_coef1 = self.g * (self.m1 * self.L1g + self.m2 * self.L1)
+    self.grav_coef2 = self.g * (self.m2 * self.L2g)
+
   def _ode(self, inputs, joint_state, endpoint_load):
     # first two elements of state are joint position, last two elements are joint angular velocities
     pos0, pos1, vel0, vel1 = joint_state[:, 0], joint_state[:, 1], joint_state[:, 2], joint_state[:, 3]
@@ -456,7 +467,12 @@ class TwoDofArm(Skeleton):
     l_col = (jacobian_12 * endpoint_load[:, 0]) + (jacobian_22 * endpoint_load[:, 1])
     torques = inputs + np.stack([r_col, l_col], axis=1)
 
-    rhs = -coriolis[:, :, None] + torques[:, :, None]
+    # gravity torque (zero when g=0); subtracted from the net joint torque
+    gravity_1 = self.grav_coef1 * c1 + self.grav_coef2 * c12
+    gravity_2 = self.grav_coef2 * c12
+    gravity = np.stack([gravity_1, gravity_2], axis=1)
+
+    rhs = -coriolis[:, :, None] + (torques - gravity)[:, :, None]
 
     denom = 1 / (inertia[:, 0, 0] * inertia[:, 1, 1] - inertia[:, 0, 1] * inertia[:, 1, 0])
     l_col = np.stack([inertia[:, 1, 1], -inertia[:, 1, 0]], axis=1)
@@ -570,6 +586,7 @@ class TwoDofArm(Skeleton):
         'c_viscosity': self.detach(self.c_viscosity),
         'coriolis_1': self.detach(self.coriolis_1),
         'coriolis_2': self.detach(self.coriolis_2),
+        'g': self.detach(self.g),
         'm1': self.detach(self.m1),
         'm2': self.detach(self.m2)
         }
