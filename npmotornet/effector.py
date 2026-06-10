@@ -991,11 +991,18 @@ class CompliantTendonArm26(RigidTendonArm26):
 
   def __init__(self, timestep=0.0002, skeleton=None, muscle_kwargs: dict = {}, **kwargs):
     integration_method = kwargs.pop('integration_method', 'rk4')
+    # gravity routes to the default skeleton; tau_activation routes to the muscle.
+    # Both are popped here so they never reach the Effector base (which rejects them).
+    g = kwargs.pop('g', 0.)
+    tau_activation = kwargs.pop('tau_activation', None)
     if skeleton is None:
-      skeleton = TwoDofArm(m1=1.82, m2=1.43, l1g=.135, l2g=.165, i1=.051, i2=.057, l1=.309, l2=.333)
+      skeleton = TwoDofArm(m1=1.82, m2=1.43, l1g=.135, l2g=.165, i1=.051, i2=.057, l1=.309, l2=.333, g=g)
+
+    muscle = (CompliantTendonHillMuscle(tau_activation=tau_activation)
+              if tau_activation is not None else CompliantTendonHillMuscle())
 
     super().__init__(
-      muscle=CompliantTendonHillMuscle(),
+      muscle=muscle,
       skeleton=skeleton,
       timestep=timestep,
       integration_method=integration_method,
