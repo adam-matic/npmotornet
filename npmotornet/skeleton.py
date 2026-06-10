@@ -385,7 +385,7 @@ class TwoDofArm(Skeleton):
 
   def __init__(self, name: str = 'two_dof_arm', m1: float = 1.864572, m2: float = 1.534315, l1g: float = 0.180496,
          l2g: float = 0.181479, i1: float = 0.013193, i2: float = 0.020062, l1: float = 0.309,
-         l2: float = 0.26, viscosity: float = 0., **kwargs):
+         l2: float = 0.26, viscosity: float = 0., g: float = 0., **kwargs):
 
     sho_limit = np.deg2rad([-0, 140])  # mechanical constraints - used to be -90 180
     elb_limit = np.deg2rad([0, 160])
@@ -425,6 +425,18 @@ class TwoDofArm(Skeleton):
     self.coriolis_2 = self.m2 * self.L1 * self.L2g
     self.c_viscosity = viscosity  # put at zero but available if implemented later on
 
+    # Gravity (acts along -y; angles are measured from +x as in _joint2cartesian).
+    # The two link COMs sit at heights L1g*sin(t1) and L1*sin(t1)+L2g*sin(t1+t2),
+    # so the potential energy is U = g*(m1*L1g*sin(t1) + m2*(L1*sin(t1) + L2g*sin(t1+t2))).
+    # The configuration-dependent gravity torque is G = dU/dq:
+    #   G1 = g*[(m1*L1g + m2*L1)*cos(t1) + m2*L2g*cos(t1+t2)]
+    #   G2 = g*m2*L2g*cos(t1+t2)
+    # and the generalized gravity force added to the equations of motion is -G.
+    # g = 0 (the default) makes both coefficients vanish, recovering the free arm.
+    self.g = g
+    self.gravity_coef_1 = self.g * (self.m1 * self.L1g + self.m2 * self.L1)  # *cos(t1)
+    self.gravity_coef_12 = self.g * self.m2 * self.L2g                        # *cos(t1+t2)
+
   def _ode(self, inputs, joint_state, endpoint_load):
     # first two elements of state are joint position, last two elements are joint angular velocities
     pos0, pos1, vel0, vel1 = joint_state[:, 0], joint_state[:, 1], joint_state[:, 2], joint_state[:, 3]
@@ -456,7 +468,13 @@ class TwoDofArm(Skeleton):
     l_col = (jacobian_12 * endpoint_load[:, 0]) + (jacobian_22 * endpoint_load[:, 1])
     torques = inputs + np.stack([r_col, l_col], axis=1)
 
-    rhs = -coriolis[:, :, None] + torques[:, :, None]
+    # configuration-dependent gravity torque G = dU/dq; the generalized force is -G
+    # (vanishes when g = 0). See __init__ for the derivation.
+    gravity_1 = self.gravity_coef_1 * c1 + self.gravity_coef_12 * c12
+    gravity_2 = self.gravity_coef_12 * c12
+    gravity = np.stack([gravity_1, gravity_2], axis=1)
+
+    rhs = -coriolis[:, :, None] + torques[:, :, None] - gravity[:, :, None]
 
     denom = 1 / (inertia[:, 0, 0] * inertia[:, 1, 1] - inertia[:, 0, 1] * inertia[:, 1, 0])
     l_col = np.stack([inertia[:, 1, 1], -inertia[:, 1, 0]], axis=1)
@@ -570,6 +588,7 @@ class TwoDofArm(Skeleton):
         'c_viscosity': self.detach(self.c_viscosity),
         'coriolis_1': self.detach(self.coriolis_1),
         'coriolis_2': self.detach(self.coriolis_2),
+        'g': self.detach(self.g),
         'm1': self.detach(self.m1),
         'm2': self.detach(self.m2)
         }
