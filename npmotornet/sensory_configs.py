@@ -709,6 +709,22 @@ def get_spindle_validation_data(config_name):
 #   tau_stale               : visual staleness time (s). Visual covariance gains
 #                             tau_stale**2 * v v^T, down-weighting vision along the
 #                             direction of motion when the hand moves fast.
+#
+# Phase 2 parameters (causal inference + slow recalibration; both off by default
+# in BayesianHandEstimator -- causal=False and b_prop=0 give the Phase 1 behaviour):
+#   p_common                : prior probability the two cues share one cause. With
+#                             the cue difference d, p(C=1|d) model-averages the fused
+#                             and proprioception-only estimates, so the felt drift
+#                             rises, peaks, then COLLAPSES as d grows -- the
+#                             rubber-hand illusion breakdown (Koerding et al. 2007).
+#   sigma_prior             : spatial-prior breadth (m). Sets the cue-difference
+#                             scale beyond which fusion gives way to segregation
+#                             (i.e. where the illusion breaks down).
+#   recal_rate              : per-trial learning gain of the slow proprioceptive
+#                             recalibration, b_prop += recal_rate*(x_vis - x_prop).
+#                             Carries state across trials and persists when vision is
+#                             removed -- the prism after-effect (Harris 1963; Redding
+#                             & Wallace 1996).
 
 HAND_POSITION_CONFIGS = {
     # --------------------------------------------------------------------------
@@ -754,6 +770,28 @@ HAND_POSITION_CONFIGS = {
         'prop_latency': 0.020,         # s, proprioception to S1
         'vis_latency': 0.070,          # s, vision to V1
         'tau_stale': 0.050,            # s, the differential (down-weights vision when moving)
+    },
+
+    # --------------------------------------------------------------------------
+    # Phase 2 -- causal inference (illusion breakdown) and slow recalibration.
+    # --------------------------------------------------------------------------
+    # Koerding, Beierholm, Ma, Quartz, Tenenbaum & Shams (2007, PLoS ONE) --
+    # "Causal inference in multisensory perception"; Samad, Chung & Shams (2015,
+    # PLoS ONE) -- causal inference explains the rubber-hand illusion and its
+    # breakdown at large displacement. Harris (1963, Psych Rev) and Redding &
+    # Wallace (1996) -- prism adaptation has a proprioceptive recalibration
+    # component that produces a negative after-effect (mis-reach opposite the prism
+    # when vision is removed), decaying over washout.
+    #
+    # p_common and sigma_prior set WHERE forced fusion gives way to segregation:
+    # with a 0.10 m prior breadth the felt drift peaks near a ~45 mm displacement
+    # and has collapsed by ~150-200 mm, a plausible rubber-hand range. recal_rate
+    # is a slow per-trial gain; over tens-to-hundreds of trials it yields a partial
+    # (here ~70%) felt-map shift, as the visual/motor components absorb the rest.
+    'causal_recalibration': {
+        'p_common': 0.8,               # prior prob of a shared cause
+        'sigma_prior': 0.10,           # m, spatial-prior breadth (breakdown scale)
+        'recal_rate': 0.01,            # per-trial proprioceptive recalibration gain
     },
 }
 
