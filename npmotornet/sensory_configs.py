@@ -685,3 +685,99 @@ def get_spindle_validation_data(config_name):
         [20, 22.5, 25, 27.5, 30]
     """
     return SPINDLE_VALIDATION_DATA.get(config_name, None)
+
+
+# ==============================================================================
+# Hand-Position Sensory Configurations (visual + proprioceptive, Cartesian)
+# ==============================================================================
+# Calibration for Bayesian visual-proprioceptive hand-position fusion. These are
+# the reliabilities that precision-weight the two Cartesian estimates of hand
+# location used by the 2-DOF reaching arm's Level-3 perceptual input function
+# (musclesim: core/bayesian_hand_2dof.py, docs/BAYESIAN_SENSORY_INTEGRATION.md).
+#
+# Unlike the GTO/spindle configs above (firing-rate models), these are the
+# *position-uncertainty* parameters of the cue-combination stage: a joint-angle
+# proprioceptive SD propagated to Cartesian through the FK Jacobian, an
+# anisotropic visual covariance, and a movement-dependent visual staleness time.
+#
+# Keys:
+#   sigma_q                 : joint-angle proprioceptive SD (rad). Mapped to a
+#                             Cartesian covariance by Sigma_prop = J Sigma_q J^T,
+#                             so proprioceptive reliability is posture-dependent.
+#   sigma_vis_radial        : visual position SD (m) along the radial/depth axis.
+#   sigma_vis_tangential    : visual position SD (m) across it (the better axis).
+#   tau_stale               : visual staleness time (s). Visual covariance gains
+#                             tau_stale**2 * v v^T, down-weighting vision along the
+#                             direction of motion when the hand moves fast.
+
+HAND_POSITION_CONFIGS = {
+    # --------------------------------------------------------------------------
+    # van Beers, Sittig & Denier van der Gon (1998, 1999); van Beers, Wolpert &
+    # Haggard (2002) -- human visual-proprioceptive hand localization.
+    # --------------------------------------------------------------------------
+    # "The precision of proprioceptive position sense" (Exp Brain Res, 1998);
+    # "Integration of proprioceptive and visual position-information" (J
+    # Neurophysiol 81, 1999); "When feeling is more important than seeing in
+    # sensorimotor adaptation" (Curr Biol 12, 2002).
+    #
+    # Findings used here:
+    #   - Proprioceptive and visual hand-localization variances are COMPARABLE
+    #     (order ~1 cm SD), so neither cue dominates a priori; the optimal weight
+    #     is set locally by direction and posture.
+    #   - Both modalities are ANISOTROPIC, and crucially with OPPOSITE principal
+    #     axes: vision is worse in the radial/depth direction (away from the eye),
+    #     proprioception is worse tangentially. The radial<->tangential visual
+    #     split below encodes the visual half; the proprioceptive anisotropy
+    #     emerges for free from the FK-Jacobian propagation of an isotropic
+    #     joint-angle SD.
+    #   - sigma_q ~ 1.5 deg (0.026 rad) is a representative human joint
+    #     position-sense SD (~1-2.5 deg across joints; van Beers 1998,
+    #     Proske & Gandevia 2012 review).
+    'van_beers_human_hand': {
+        'sigma_q': 0.026,              # rad (~1.5 deg) joint-angle proprioceptive SD
+        'sigma_vis_radial': 0.012,     # m, visual SD along radial/depth axis (worse)
+        'sigma_vis_tangential': 0.006, # m, visual SD across it (better)
+        'tau_stale': 0.050,            # s, visual lag vs proprioception (staleness)
+    },
+
+    # --------------------------------------------------------------------------
+    # Staleness time from the visual-vs-proprioceptive latency differential.
+    # --------------------------------------------------------------------------
+    # Crevecoeur, Munoz & Scott (2016, J Neurosci) -- "somatosensory speed trumps
+    # visual accuracy"; Kasuga, Crevecoeur & Scott (2024, eNeuro) -- different
+    # sensory information for state estimation when stationary vs moving.
+    # Afferent arrival ~20 ms (proprioception to S1) vs ~70 ms (vision to V1);
+    # ~50 ms vs ~100-120 ms at the level of influence on motor output. The ~50 ms
+    # differential is the staleness time: when moving, the visual cue reports the
+    # hand ~50 ms in the past, so its effective position variance grows with speed.
+    'crevecoeur_scott_latency': {
+        'prop_latency': 0.020,         # s, proprioception to S1
+        'vis_latency': 0.070,          # s, vision to V1
+        'tau_stale': 0.050,            # s, the differential (down-weights vision when moving)
+    },
+}
+
+
+def get_hand_position_config(config_name='van_beers_human_hand'):
+    """Get a calibrated hand-position (visual + proprioceptive) configuration.
+
+    Args:
+        config_name: String, name of the configuration. Default is
+            'van_beers_human_hand'.
+
+    Returns:
+        Dictionary of parameters for BayesianHandEstimator
+        (musclesim/core/bayesian_hand_2dof.py).
+
+    Example:
+        >>> from npmotornet.sensory_configs import get_hand_position_config
+        >>> cfg = get_hand_position_config()
+        >>> cfg['sigma_vis_radial']
+        0.012
+    """
+    return HAND_POSITION_CONFIGS[config_name]
+
+
+def list_hand_position_configs():
+    """List available hand-position configuration names."""
+    return list(HAND_POSITION_CONFIGS.keys())
