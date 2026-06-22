@@ -404,3 +404,165 @@ class MuscleSpindle:
         II_firing = np.clip(II_firing, a_min=0.0, a_max=self.saturation_II)
 
         return {'Ia': Ia_firing, 'II': II_firing}
+
+
+class MileusnicSpindle:
+    """Fusimotor spindle with additive (threshold-shift) gamma drive.
+
+    Faithful to Mileusnic, Brown, Lan & Loeb (2006): gamma fusimotor drive
+    shifts the operating point of the spindle, not the gain on length deviation.
+    This means gamma keeps spindles loaded even when a muscle shortens
+    (alpha-gamma coactivation / follow-up servo).
+
+    Multiplicative gamma (MuscleSpindle) zeroes out at L=L0 and inverts below
+    it — this class fixes that by making gamma additive.
+
+    Equations:
+        Ia = baseline_Ia
+             + k_Ia_static * (L - L0)
+             + beta_static * gamma_static
+             + k_Ia_dynamic * v * (1 + g_d * gamma_dynamic)
+             + beta_dynamic * gamma_dynamic
+        II = baseline_II
+             + k_II_static * (L - L0)
+             + beta_II_static * gamma_static
+    """
+
+    def __init__(
+        self,
+        n_receptors: int,
+        k_Ia_static: float = 250.0,
+        k_Ia_dynamic: float = 400.0,
+        k_II_static: float = 100.0,
+        baseline_Ia: float = 20.0,
+        baseline_II: float = 10.0,
+        saturation_Ia: float = 150.0,
+        saturation_II: float = 80.0,
+        optimal_length: float = 0.08,
+        gamma_dynamic_gain: float = 1.0,
+        beta_static: float = 30.0,
+        beta_dynamic: float = 20.0,
+        beta_II_static: float = 20.0,
+    ):
+        self.n_receptors = n_receptors
+        self.k_Ia_static = np.array(k_Ia_static, dtype=np.float32)
+        self.k_Ia_dynamic = np.array(k_Ia_dynamic, dtype=np.float32)
+        self.k_II_static = np.array(k_II_static, dtype=np.float32)
+        self.baseline_Ia = np.array(baseline_Ia, dtype=np.float32)
+        self.baseline_II = np.array(baseline_II, dtype=np.float32)
+        self.saturation_Ia = np.array(saturation_Ia, dtype=np.float32)
+        self.saturation_II = np.array(saturation_II, dtype=np.float32)
+        self.optimal_length = np.array(optimal_length, dtype=np.float32)
+        self.gamma_dynamic_gain = np.array(gamma_dynamic_gain, dtype=np.float32)
+        self.beta_static = np.array(beta_static, dtype=np.float32)
+        self.beta_dynamic = np.array(beta_dynamic, dtype=np.float32)
+        self.beta_II_static = np.array(beta_II_static, dtype=np.float32)
+        self.previous_length = None
+        self.dt = None
+
+    def reset(self, batch_size: int = 1):
+        self.previous_length = None
+
+    def get_firing_rate(
+        self,
+        muscle_length: np.ndarray,
+        muscle_velocity: np.ndarray,
+        dt: float,
+        gamma_dynamic: np.ndarray = None,
+        gamma_static: np.ndarray = None,
+    ) -> dict:
+        """Compute Ia and II firing rates with additive fusimotor drive.
+
+        Args:
+            muscle_length: Array of shape (batch_size, n_muscles), fiber length (m).
+            muscle_velocity: Array of shape (batch_size, n_muscles), fiber velocity (m/s).
+            dt: Timestep duration (s).
+            gamma_dynamic: Array or None, dynamic fusimotor drive (0-1).
+            gamma_static: Array or None, static fusimotor drive (0-1).
+
+        Returns:
+            Dictionary with keys 'Ia' and 'II', each shape (batch_size, n_receptors).
+        """
+        self.dt = dt
+        if self.previous_length is None:
+            self.reset(batch_size=muscle_length.shape[0])
+            self.previous_length = muscle_length.copy()
+
+        if gamma_dynamic is None:
+            gamma_dynamic = np.zeros_like(muscle_length)
+        if gamma_static is None:
+            gamma_static = np.zeros_like(muscle_length)
+
+        gamma_dynamic = np.clip(gamma_dynamic, 0.0, 1.0)
+        gamma_static = np.clip(gamma_static, 0.0, 1.0)
+
+        length_deviation = muscle_length - self.optimal_length
+
+        # Additive static gamma: shifts operating point, not gain
+        Ia_static = self.k_Ia_static * length_deviation + self.beta_static * gamma_static
+
+        # Dynamic gamma modulates velocity sensitivity (gain) plus additive offset
+        Ia_dynamic = (
+            self.k_Ia_dynamic * muscle_velocity * (1.0 + self.gamma_dynamic_gain * gamma_dynamic)
+            + self.beta_dynamic * gamma_dynamic
+        )
+
+        Ia_firing = self.baseline_Ia + Ia_static + Ia_dynamic
+        Ia_firing = np.clip(Ia_firing, a_min=0.0, a_max=self.saturation_Ia)
+
+        II_firing = (
+            self.baseline_II
+            + self.k_II_static * length_deviation
+            + self.beta_II_static * gamma_static
+        )
+        II_firing = np.clip(II_firing, a_min=0.0, a_max=self.saturation_II)
+
+        self.previous_length = muscle_length.copy()
+        return {'Ia': Ia_firing, 'II': II_firing}
+
+    def get_Ia_response(
+        self,
+        muscle_length: np.ndarray,
+        muscle_velocity: np.ndarray,
+        dt: float,
+        gamma_dynamic: np.ndarray = None,
+        gamma_static: np.ndarray = None,
+    ) -> np.ndarray:
+        return self.get_firing_rate(
+            muscle_length, muscle_velocity, dt, gamma_dynamic, gamma_static
+        )['Ia']
+
+    def get_II_response(
+        self,
+        muscle_length: np.ndarray,
+        muscle_velocity: np.ndarray,
+        dt: float,
+        gamma_static: np.ndarray = None,
+    ) -> np.ndarray:
+        return self.get_firing_rate(
+            muscle_length, muscle_velocity, dt, gamma_dynamic=None, gamma_static=gamma_static
+        )['II']
+
+    def get_static_response(
+        self,
+        muscle_length: np.ndarray,
+        gamma_static: np.ndarray = None,
+    ) -> dict:
+        """Steady-state firing rates (zero velocity) for length-tuning analysis."""
+        if gamma_static is None:
+            gamma_static = np.zeros_like(muscle_length)
+        gamma_static = np.clip(gamma_static, 0.0, 1.0)
+        length_deviation = muscle_length - self.optimal_length
+        Ia_firing = (
+            self.baseline_Ia
+            + self.k_Ia_static * length_deviation
+            + self.beta_static * gamma_static
+        )
+        Ia_firing = np.clip(Ia_firing, a_min=0.0, a_max=self.saturation_Ia)
+        II_firing = (
+            self.baseline_II
+            + self.k_II_static * length_deviation
+            + self.beta_II_static * gamma_static
+        )
+        II_firing = np.clip(II_firing, a_min=0.0, a_max=self.saturation_II)
+        return {'Ia': Ia_firing, 'II': II_firing}
