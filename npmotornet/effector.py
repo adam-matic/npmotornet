@@ -929,9 +929,11 @@ class RigidTendonArm26(Effector):
     elb_limit = np.deg2rad([0, 155])
     pos_lower_bound = kwargs.pop('pos_lower_bound', [sho_limit[0], elb_limit[0]])
     pos_upper_bound = kwargs.pop('pos_upper_bound', [sho_limit[1], elb_limit[1]])
+    # gravity routes to the default skeleton; popped so it never reaches the Effector base.
+    g = kwargs.pop('g', 0.)
 
     if skeleton is None:
-      skeleton = TwoDofArm(m1=1.82, m2=1.43, l1g=.135, l2g=.165, i1=.051, i2=.057, l1=.309, l2=.333)
+      skeleton = TwoDofArm(m1=1.82, m2=1.43, l1g=.135, l2g=.165, i1=.051, i2=.057, l1=.309, l2=.333, g=g)
 
     super().__init__(
       skeleton=skeleton,

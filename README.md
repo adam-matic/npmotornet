@@ -9,21 +9,22 @@ A NumPy-based biomechanical simulation library for motor control research.
 ## Features
 
 - **Pure NumPy**: No PyTorch or GPU dependencies
-- **Biomechanically Realistic Models**: Multiple skeleton types (PointMass, TwoDofArm) and muscle models
+- **Biomechanically Realistic Models**: Multiple skeleton types (PointMass, OneDofArm, TwoDofArm) and muscle models
+- **Gravity**: optional configuration-dependent gravity torque on `TwoDofArm` (`g=9.81`), routed through the arm26 effectors
 - **Muscle Models**:
   - ReluMuscle: Simple linear force production
   - RigidTendonHillMuscle: Hill-type muscle with rigid tendon
   - RigidTendonHillMuscleThelen: Thelen's formulation
   - CompliantTendonHillMuscle: Full elastic tendon model
 - **Pre-built Effectors**: Ready-to-use biomechanical systems (ReluPointMass24, RigidTendonArm26, CompliantTendonArm26)
-- **Numerical Integration**: Euler and Runge-Kutta 4th order methods
+- **Proprioceptors** (`npmotornet.sensory`): Golgi tendon organs, muscle spindles (`MuscleSpindle`, and `MileusnicSpindle` with additive fusimotor drive), calibrated parameter sets in `npmotornet.sensory_configs`
+- **Numerical Integration**: Euler, Runge-Kutta 4th order, and adaptive RKF45/DOPRI5
 
 ## Installation
 
 ```bash
-# Clone or copy the npmotornet directory
-# No additional dependencies beyond NumPy
-pip install numpy
+pip install -e .          # from a clone; depends only on NumPy
+python -m pytest tests    # optional
 ```
 
 ## Quick Start
