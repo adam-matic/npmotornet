@@ -718,7 +718,7 @@ class RigidTendonHillMuscleThelen(Muscle):
 
 
 class CompliantTendonHillMuscle(RigidTendonHillMuscle):
-  """This pre-built muscle class is an implementation of a Hill-type muscle model as detailed in `[1]`. Unlike its
+  r"""This pre-built muscle class is an implementation of a Hill-type muscle model as detailed in `[1]`. Unlike its
   parent class, this class implements a full compliant tendon version of the model, as formulated in the
   reference article.
 
@@ -727,15 +727,41 @@ class CompliantTendonHillMuscle(RigidTendonHillMuscle):
     movements. J Neurophysiol. 2010 Dec;104(6):2985-94. doi: 10.1152/jn.00483.2010. Epub 2010 Sep 8. PMID:
     20884757.`
 
+  Optional short-range stiffness (SRS). Hill-type models lack the steep, activation-scaled stiffness that muscle
+  shows over the first few percent of stretch (short-range stiffness), and in this formulation the force-velocity
+  damping at the isometric point even falls as activation rises from ~0.04 to 0.3, so co-contraction barely
+  stiffens the muscle. With ``srs_gamma > 0`` an elastic element acts in parallel with the contractile element:
+
+  .. math::
+    f_{srs} = \gamma \cdot a \cdot f_l(l) \cdot \mathrm{clip}\left(\frac{l - l_{anchor}}{l_0}, -\epsilon, \epsilon\right)
+
+  in units of maximum isometric force, where :math:`a f_l(l)` is the current active isometric force capacity. The
+  anchor (the fibre length at which the attached cross-bridges are unstrained) relaxes toward the fibre length with
+  time constant :math:`\tau` and slips once the stretch exceeds :math:`\epsilon l_0`, so the element resists fast,
+  small perturbations without locking slow posture changes. The element's force is carried in parallel with the
+  contractile element, so it reduces the load the force-velocity relation sees. See De Groote et al. (2017),
+  J Biomech, for the same approach. With ``srs_gamma = 0`` (the default) the model is unchanged, and the muscle
+  state gains an extra ``'short-range anchor length'`` row only when the element is enabled.
+
   Args:
     min_activation: `Float`, the minimum activation value that this muscle can have. Any activation value lower than
       this value will be clipped.
+    srs_gamma: `Float`, normalised short-range stiffness :math:`\gamma` (stiffness times optimal fibre length,
+      divided by active isometric force). `0` disables the element.
+    srs_range: `Float`, short-range limit :math:`\epsilon` as a fraction of optimal fibre length.
+    srs_tau: `Float`, time constant (s) with which the anchor relaxes toward the fibre length.
     **kwargs: All contents are passed to the parent :class:`Muscle` class.
   """
 
-  def __init__(self, min_activation=0.01, **kwargs):
+  def __init__(self, min_activation=0.01, srs_gamma=0., srs_range=0.01, srs_tau=0.1, **kwargs):
     super().__init__(min_activation=min_activation, **kwargs)
     self.__name__ = 'CompliantTendonHillMuscle'
+    if srs_gamma < 0 or srs_range <= 0 or srs_tau <= 0:
+      raise ValueError("srs_gamma must be >= 0; srs_range and srs_tau must be positive")
+    self.srs_gamma = np.array(srs_gamma, dtype=np.float32)
+    self.srs_range = np.array(srs_range, dtype=np.float32)
+    self.srs_tau = np.array(srs_tau, dtype=np.float32)
+    self.short_range_stiffness = bool(srs_gamma > 0)
 
     self.state_name = [
       'activation',
@@ -745,6 +771,8 @@ class CompliantTendonHillMuscle(RigidTendonHillMuscle):
       'force-length SE',
       'active force',
       'force']
+    if self.short_range_stiffness:
+      self.state_name.append('short-range anchor length')
     self.state_dim = len(self.state_name)
     self.built = False
 
@@ -760,7 +788,12 @@ class CompliantTendonHillMuscle(RigidTendonHillMuscle):
     # Compute forces
     flse = np.clip(self.k_se * (tendon_strain ** 2), a_min=None, a_max=1.)
     flpe = self.k_pe * (muscle_strain ** 2)
-    active_force = np.clip(flse - flpe, a_min=0., a_max=None)
+    if self.short_range_stiffness:
+      anchor = muscle_state[:, 7:8, :] if muscle_state.shape[1] > 7 else muscle_len
+      srs_force = self._short_range_force(muscle_len, muscle_state[:, 0:1, :], anchor)
+      active_force = np.clip(flse - flpe - srs_force, a_min=0., a_max=None)
+    else:
+      active_force = np.clip(flse - flpe, a_min=0., a_max=None)
 
     # Integrate
     d_activation = state_derivative[:, 0:1, :]
@@ -771,7 +804,20 @@ class CompliantTendonHillMuscle(RigidTendonHillMuscle):
 
     muscle_vel = muscle_vel_n * self.vmax
     force = flse * self.max_iso_force
-    return np.concatenate([activation, new_muscle_len, muscle_vel, flpe, flse, active_force, force], axis=1)
+    states = [activation, new_muscle_len, muscle_vel, flpe, flse, active_force, force]
+    if self.short_range_stiffness:
+      # anchor relaxes toward the fibre length, and slips once the stretch exceeds the short range
+      anchor = anchor + dt * (new_muscle_len - anchor) / self.srs_tau
+      limit = self.srs_range * self.l0_ce
+      states.append(np.clip(anchor, new_muscle_len - limit, new_muscle_len + limit))
+    return np.concatenate(states, axis=1)
+
+  def _short_range_force(self, muscle_len, activation, anchor):
+    """Short-range stiffness force, in units of maximum isometric force."""
+    muscle_len_n = muscle_len / self.l0_ce
+    flce = np.clip(1. + (- muscle_len_n ** 2 + 2 * muscle_len_n - 1) / self.f_iso_n_den, a_min=self.min_flce, a_max=None)
+    stretch = np.clip((muscle_len - anchor) / self.l0_ce, -self.srs_range, self.srs_range)
+    return self.srs_gamma * self.clip_activation(activation) * flce * stretch
 
   def _ode(self, excitation, muscle_state):
     activation = muscle_state[:, 0:1, :]

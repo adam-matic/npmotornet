@@ -11,6 +11,7 @@ A NumPy-based biomechanical simulation library for motor control research.
 - **Pure NumPy**: No PyTorch or GPU dependencies
 - **Biomechanically Realistic Models**: Multiple skeleton types (PointMass, OneDofArm, TwoDofArm) and muscle models
 - **Gravity**: optional configuration-dependent gravity torque on `TwoDofArm` (`g=9.81`), routed through the arm26 effectors
+- **Muscle short-range stiffness**: optional activation-scaled elastic element in `CompliantTendonHillMuscle` (`srs_gamma`, `srs_range`, `srs_tau`; also accepted by `CompliantTendonArm26`), off by default
 - **Muscle Models**:
   - ReluMuscle: Simple linear force production
   - RigidTendonHillMuscle: Hill-type muscle with rigid tendon
