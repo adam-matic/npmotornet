@@ -1000,8 +1000,11 @@ class CompliantTendonArm26(RigidTendonArm26):
     if skeleton is None:
       skeleton = TwoDofArm(m1=1.82, m2=1.43, l1g=.135, l2g=.165, i1=.051, i2=.057, l1=.309, l2=.333, g=g)
 
-    muscle = (CompliantTendonHillMuscle(tau_activation=tau_activation)
-              if tau_activation is not None else CompliantTendonHillMuscle())
+    # optional muscle short-range stiffness (see CompliantTendonHillMuscle)
+    muscle_options = {key: kwargs.pop(key) for key in ('srs_gamma', 'srs_range', 'srs_tau') if key in kwargs}
+    if tau_activation is not None:
+      muscle_options['tau_activation'] = tau_activation
+    muscle = CompliantTendonHillMuscle(**muscle_options)
 
     super().__init__(
       muscle=muscle,
